@@ -1,3 +1,4 @@
+
 # Latent Diffusion Model for 2D Chest CT Synthesis
 
 This is a code repository for the [PHASE IV AI project](https://www.phase4ai-project.eu/) developed by [Eurecat - Multimedia Technologies Unit](https://multimedia-eurecat.github.io/team/).
@@ -33,12 +34,39 @@ conda activate ccia24
 
 
 ---
-#### Run the experiments
+#### Training
+
+Use `CCIA24_run_exp.sh` to train the models presented in the paper.
+
+Remember to update the .sh file with your own paths.
 
 ```
 conda activate ccia24
 bash CCIA24_run_exp.sh
 ```
+
+---
+#### Inference and evaluation
+
+Use `generate_images.sh` to generate N images using one or more checkpoints.
+
+Afterwards, you can evaluate the quality of synthetic images with respect to real images using `compute_fid.sh`.
+
+Remember to update the .sh files with your own paths.
+
+
+```
+conda activate ccia24
+bash generate_images.sh
+bash compute_fid.sh
+```
+
+---
+#### Other
+
+The jupyter notebooks in `notebooks` were used for secondary debugging and data checks.
+
+The scripts in `dataset_preprocessing` were used to produce the training set of 2D images and nodule masks in png format from the original LIDC-IDRI chest CT data.
 
 ---
 #### Data
@@ -52,6 +80,7 @@ Original data: [LIDC-IDRI](https://www.cancerimagingarchive.net/collection/lidc-
 #### Acknowledgements
 Training script based on:
 - Training an unconditional LDM: [https://github.com/zyinghua/uncond-image-generation-ldm](https://github.com/zyinghua/uncond-image-generation-ldm) - Original README [here](old_README.md).
+
 UNet implementation based on:
 - InverseSR: 3D Brain MRI Super-Resolution Using a Latent Diffusion Model: [https://github.com/BioMedAI-UCSC/InverseSR](https://github.com/BioMedAI-UCSC/InverseSR)
 

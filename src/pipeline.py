@@ -6,8 +6,7 @@ import torch
 import torch.nn as nn
 from diffusers import (
     VQModel,
-    UNet2DModel,
-    UNet2DConditionModel
+    UNet2DModel
 )
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from diffusers.schedulers import (

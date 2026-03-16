@@ -14,13 +14,12 @@ from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from torchvision import transforms
 from tqdm.auto import tqdm
 
 import diffusers
-from diffusers import DDPMScheduler, UNet2DModel, UNet2DConditionModel, AutoencoderKL, VQModel
+from diffusers import DDPMScheduler, UNet2DModel, VQModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, is_accelerate_version, is_tensorboard_available, is_wandb_available
@@ -34,12 +33,12 @@ from pipeline import *
 from utils_lidc import *
 from custom_unet_cond import *
 
-import datetime
-
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.26.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
+
+DEBUG = False
 
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
@@ -96,12 +95,19 @@ def main(args):
                 if args.use_ema:
                     ema_model.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
+                # save trainable models
                 model_names = ["unet", "emb"]
                 for i, (model, folder_name) in enumerate(zip(models, model_names)):
                     model.save_pretrained(os.path.join(output_dir, folder_name))
+                    weights.pop() # make sure to pop weight so that corresponding model is not saved again
 
-                    # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
+                # save scheduler config
+                noise_scheduler.save_pretrained(os.path.join(output_dir, "scheduler"))
+
+                # save only VAE config, not weights, because VAE is not trainable
+                vae_config_dir = os.path.join(output_dir, "vae")
+                os.makedirs(vae_config_dir, exist_ok=True)
+                vae.save_config(vae_config_dir)
 
         def load_model_hook(models, input_dir):
             if args.use_ema:
@@ -116,7 +122,7 @@ def main(args):
                 model = models.pop()
 
                 # load diffusers style into model
-                load_model = UNet2DModel.from_pretrained(input_dir, subfolder=foder_name)
+                load_model = UNet2DModel.from_pretrained(input_dir, subfolder=folder_name)
                 model.register_to_config(**load_model.config)
 
                 model.load_state_dict(load_model.state_dict())
@@ -144,54 +150,43 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
-
     # Load pretrained VAE model
     vae = VQModel.from_pretrained("CompVis/ldm-celebahq-256", subfolder="vqvae")
     #vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="vae")
-
-
     # Freeze the VAE model
     vae.requires_grad_(False)
-
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
 
     # Initialize the model
     if args.model_config_name_or_path is None:
-        #model = UNet2DModel(sample_size=args.resolution // vae_scale_factor, in_channels=3, out_channels=3)
-        #model = UNet2DModel(sample_size=args.resolution // vae_scale_factor, in_channels=3+1*(3+args.emb_size), out_channels=3)
-        #model = UNet2DModel(sample_size=args.resolution // vae_scale_factor, in_channels=3, out_channels=3, num_class_embeds=6*10)
-        #model = UNet2DConditionModel(sample_size=args.resolution // vae_scale_factor, in_channels=3+1*(3+args.emb_size), out_channels=3)
-
-        #Compvis: https://github.com/CompVis/stable-diffusion
-        #model = Model(in_channels=3+3, out_ch=3, ch=128, num_res_blocks=2, 
-        #              resolution=args.resolution // vae_scale_factor, attn_resolutions=[32, 16, 8])
-        #Inverse SR: https://github.com/BioMedAI-UCSC/InverseSR
         
-        mask_channels = 3 if args.encode_mask else 1
+        if args.masks_dir is None:
+            # unconditional synthesis
+            model = UNet2DModel(sample_size=args.resolution // vae_scale_factor, in_channels=3, out_channels=3)
 
-        if args.self_attention:
-            model = UNetModel(image_size=(args.resolution // vae_scale_factor), in_channels=3 + mask_channels, out_channels=3,
-                            model_channels=128, num_res_blocks=2, attention_resolutions=[32, 16, 8],
-                            use_spatial_transformer=False)
+            print("\n\nWarning: Training unconditional model because --masks_dir is None\n\n")
+
         else:
+            # conditional synthesis
+
+            #Compvis: https://github.com/CompVis/stable-diffusion
+            #model = Model(in_channels=3+3, out_ch=3, ch=128, num_res_blocks=2, 
+            #              resolution=args.resolution // vae_scale_factor, attn_resolutions=[32, 16, 8])
+            #Inverse SR: https://github.com/BioMedAI-UCSC/InverseSR
+            mask_channels = 3 if args.encode_mask else 1
             latent_dim = (args.resolution // vae_scale_factor)
             cond_vec_len = (latent_dim*latent_dim*mask_channels)
             in_channels = 3 + mask_channels
             if args.nodule_attributes:
                 cond_vec_len += args.emb_size
-                if args.nodule_attributes_v2:
-                    in_channels += args.emb_size
-            model = UNetModel(image_size=(args.resolution // vae_scale_factor), in_channels=in_channels, out_channels=3,
-                                model_channels=128, num_res_blocks=2, attention_resolutions=[32, 16, 8],
-                                use_spatial_transformer=True, context_dim=cond_vec_len)
-        
-        #model = UNetModel(image_size=(args.resolution // vae_scale_factor), in_channels=6, out_channels=3, model_channels=128, num_res_blocks=2, 
-        #attention_resolutions=[])
 
+            cross_attention = not args.self_attention
+            model = UNetModel(image_size=(args.resolution // vae_scale_factor),
+                            in_channels=in_channels, out_channels=3,
+                            model_channels=128, num_res_blocks=2, attention_resolutions=[32, 16, 8],
+                            use_spatial_transformer=cross_attention,
+                            context_dim=cond_vec_len if cross_attention else None)
+        
     else:
         config = UNet2DModel.load_config(args.model_config_name_or_path)
         model = UNet2DModel.from_config(config)
@@ -205,8 +200,8 @@ def main(args):
             use_ema_warmup=True,
             inv_gamma=args.ema_inv_gamma,
             power=args.ema_power,
-            model_cls=UNetModel, #UNet2DModel,
-            model_config=model.config_,
+            model_cls=UNet2DModel if args.masks_dir is None else UNetModel,
+            model_config=model.config if args.masks_dir is None else model.config_,
         )
 
     weight_dtype = torch.float32
@@ -242,15 +237,16 @@ def main(args):
         noise_scheduler = DDPMScheduler(num_train_timesteps=args.ddpm_num_steps, beta_schedule=args.ddpm_beta_schedule)
 
     # Initialitze the nodule features embedding
-    metadata_path = os.path.join(args.dataset_name, "metadata.jsonl")
-    assert os.path.exists(metadata_path)
-    feature_labels = ["sphericity", "lobulation", "spiculation", "margin", "texture"]
-    nodule_features_emb = NoduleFeaturesEmbedding(feature_labels, args.vocab_len, args.emb_size)
-    nodule_features_emb.to(accelerator.device)
+    if args.nodule_attributes:
+        feature_labels = ["sphericity", "lobulation", "spiculation", "margin", "texture"]
+        nodule_features_emb = NoduleFeaturesEmbedding(feature_labels, args.vocab_len, args.emb_size)
+        nodule_features_emb.to(accelerator.device)
+    else:
+        nodule_features_emb = None
 
     # Initialize the optimizer
     optimizer = torch.optim.AdamW(
-        [*model.parameters(), *nodule_features_emb.params],
+        [*model.parameters(), *nodule_features_emb.params] if args.nodule_attributes else [*model.parameters()],
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -363,16 +359,19 @@ def main(args):
             resume_step = resume_global_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
 
 
+    if args.masks_dir is None:
+        mask_generator = None
+    else:
+        assert os.path.exists(args.masks_dir)
+        mask_generator = RandomMaskGenerator(args.masks_dir)
+
+
     # Train!
-    masks_dir = args.dataset_name.replace("nodules", "masks") + "_sq"
-    assert os.path.exists(masks_dir)
-    mask_generator = RandomMaskGenerator(masks_dir)
     for epoch in range(first_epoch, args.num_epochs):
         model.train()
         progress_bar = tqdm(total=num_update_steps_per_epoch, disable=not accelerator.is_local_main_process)
         progress_bar.set_description(f"Epoch {epoch}")
         for step, batch in enumerate(train_dataloader):
-
             # Skip steps until we reach the resumed step
             if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
                 if step % args.gradient_accumulation_steps == 0:
@@ -380,25 +379,31 @@ def main(args):
                 continue
 
             clean_images = batch["image"].type(weight_dtype)
-            masks = load_nodule_masks(batch["img_ids"], metadata_path, masks_dir, resolution=256, device=clean_images.device, bbxmask=False)
-            masks = masks.type(weight_dtype)
-
             latents = vae.encode(clean_images).latents
             latents = latents * 0.18215 #vae.config.scaling_factor
 
-            if args.encode_mask:
-                mask_latents = vae.encode(masks).latents
-                mask_latents = mask_latents * 0.18215
+            # (optional) load conditional masks
+            if args.masks_dir is None:
+                masks, mask_latents = None, None # unconditional synthesis
             else:
-                # simply downsample the masks
-                compressed_h, compressed_w = latents.shape[-2], latents.shape[-1]
-                mask_t = transforms.Resize((compressed_h, compressed_w), interpolation=transforms.InterpolationMode.NEAREST)
-                mask_latents = torch.cat([mask_t(m).unsqueeze(0) for m in masks])
-                # use only one channel per binary mask instead of 3
-                mask_latents = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in mask_latents])
-                masks = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in masks])
+                metadata_path = os.path.join(args.dataset_name, "metadata.jsonl")
+                assert os.path.exists(metadata_path)
+                masks = load_nodule_masks(batch["img_ids"], metadata_path, args.masks_dir, resolution=256, device=clean_images.device, bbxmask=False)
+                masks = masks.type(weight_dtype)
 
-            # Sample noise that we'll add to the images
+                if args.encode_mask:
+                    mask_latents = vae.encode(masks).latents
+                    mask_latents = mask_latents * 0.18215
+                else:
+                    # simply downsample the masks
+                    compressed_h, compressed_w = latents.shape[-2], latents.shape[-1]
+                    mask_t = transforms.Resize((compressed_h, compressed_w), interpolation=transforms.InterpolationMode.NEAREST)
+                    mask_latents = torch.cat([mask_t(m).unsqueeze(0) for m in masks])
+                    # use only one channel per binary mask instead of 3
+                    mask_latents = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in mask_latents])
+                    masks = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in masks])
+
+            # Sample noise
             noise = torch.randn(latents.shape, dtype=weight_dtype, device=latents.device)
             bsz = latents.shape[0]  # batch size
             # Sample a random timestep for each image
@@ -411,35 +416,26 @@ def main(args):
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
             # Add masks
-            noisy_latents = torch.cat((noisy_latents, mask_latents), 1)
-            cond_latents = mask_latents.view(bsz, -1)
+            if mask_latents is None:
+                cond_latents = None # unconditional synthesis
+            else:
+                noisy_latents = torch.cat((noisy_latents, mask_latents), 1)
+                cond_latents = mask_latents.view(bsz, -1)
 
-            # inspired by https://github.com/huggingface/diffusion-models-class/blob/main/unit2/02_class_conditioned_diffusion_model_example.ipynb
-            if args.nodule_attributes:
-                emb_vec = nodule_features_emb(batch) # nodule features embedding
-                cond_latents = torch.cat([cond_latents, emb_vec], 1)
-
-                if args.nodule_attributes_v2:
-                    noisy_latents = merge_input_with_class_cond_embedding(noisy_latents, emb_vec)
-                    # noisy latents shape is (batch_size, 3(rgb) + mask_channels + emb_dim, 64, 64)
-                    # feature dim is 3 + 3 + 10 because latent dim is 3 for both image and mask, and len of attributes embedding vec is 10
+                # inspired by https://github.com/huggingface/diffusion-models-class/blob/main/unit2/02_class_conditioned_diffusion_model_example.ipynb
+                if args.nodule_attributes:
+                    emb_vec = nodule_features_emb(batch) # nodule features embedding
+                    cond_latents = torch.cat([cond_latents, emb_vec], 1)
 
             with accelerator.accumulate(model):
                 # Predict the noise residual
+                if cond_latents is None:
+                    model_output = model(noisy_latents, timesteps).sample
+                else:
+                    #INVERSE SR model original context shape is (1, 1, 4), as they have batch size 1, 1 embedding per sample, and 4-len embedding (gender, age, ventricular, brain volume)
+                    model_output = model(x=noisy_latents, t=timesteps, context=cond_latents)
 
-                # UNet2DConditionModel with encoder_hidden_states
-                # UNet2DModel with class_labels
-                # UNet2DConditionModel with added_cond_kwargs
-                #cross_attention_kwargs = {"mask": mask_latents}
-                #model_output = model(sample=noisy_latents, timestep=timesteps, encoder_hidden_states=mask_latents).sample
-                
-                #COMPVIS model
-                #model_output = model(x=noisy_latents, t=timesteps, context=mask_latents)
-                #INVERSE SR model original context shape is (1, 1, 4), as they have batch size 1, 1 embedding per sample, and 4-len embedding (gender, age, ventricular, brain volume)
-                model_output = model(x=noisy_latents, t=timesteps, context=cond_latents)
-
-
-                if args.prediction_type == "epsilon": # this is the default loss that compares predicted vs ground truth noise
+                if args.prediction_type == "epsilon": # default loss that compares predicted vs ground truth noise
                     loss = F.mse_loss(model_output.float(), noise.float())  # this could have different weights!
                 elif args.prediction_type == "sample":
                     alpha_t = _extract_into_tensor(
@@ -498,15 +494,19 @@ def main(args):
                 logs["ema_decay"] = ema_model.cur_decay_value
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
-        progress_bar.close()
 
+            if DEBUG:
+                break 
+
+        progress_bar.close()
         accelerator.wait_for_everyone()
 
         # Generate sample images for visual inspection
         if accelerator.is_main_process:
             if epoch % args.save_images_epochs == 0 or epoch == args.num_epochs - 1:
                 unet = accelerator.unwrap_model(model)
-                nodule_features_emb = accelerator.unwrap_model(nodule_features_emb)
+                if nodule_features_emb is not None:
+                    nodule_features_emb = accelerator.unwrap_model(nodule_features_emb)
 
                 if args.use_ema:
                     ema_model.store(unet.parameters())
@@ -529,12 +529,15 @@ def main(args):
                     height = 256,
                     width = 256,
                     batch_size=args.eval_batch_size,
-                    num_inference_steps=args.ddpm_num_inference_steps,
+                    num_inference_steps=1 if DEBUG else args.ddpm_num_inference_steps,
                     output_type="numpy",
                     return_dict=False
                 )
-                images, input_masks, output_masks, nodule_features = output
-                images = merge_images_with_masks(images, input_masks)
+                if mask_generator is None:
+                    images = output[0]
+                else:
+                    images, input_masks, output_masks, nodule_features = output
+                    images = merge_images_with_masks(images, input_masks)
 
                 if args.use_ema:
                     ema_model.restore(unet.parameters())
@@ -558,7 +561,8 @@ def main(args):
             if epoch % args.save_model_epochs == 0 or epoch == args.num_epochs - 1:
                 # save the model
                 unet = accelerator.unwrap_model(model)
-                nodule_features_emb = accelerator.unwrap_model(nodule_features_emb)
+                if nodule_features_emb is not None:
+                    nodule_features_emb = accelerator.unwrap_model(nodule_features_emb)
 
                 if args.use_ema:
                     ema_model.store(unet.parameters())
@@ -574,19 +578,24 @@ def main(args):
                     nodule_attributes=args.nodule_attributes
                 )
 
-                params_dict = {"unet": unet.parameters(), "emb": nodule_features_emb.params}
-                pipeline.save_pretrained(args.output_dir, params=params_dict)
+                # save trainable models
+                unet.save_pretrained(os.path.join(args.output_dir, "unet"))
+                if nodule_features_emb is not None:
+                    nodule_features_emb.save_pretrained(os.path.join(args.output_dir, "emb"))
+
+                # save scheduler config
+                noise_scheduler.save_pretrained(os.path.join(args.output_dir, "scheduler"))
+
+                # save only VAE config, not weights, because VAE is not trainable
+                vae_config_dir = os.path.join(args.output_dir, "vae")
+                os.makedirs(vae_config_dir, exist_ok=True)
+                vae.save_config(vae_config_dir)
 
                 if args.use_ema:
                     ema_model.restore(unet.parameters())
-
-                if args.push_to_hub:
-                    upload_folder(
-                        repo_id=repo_id,
-                        folder_path=args.output_dir,
-                        commit_message=f"Epoch {epoch}",
-                        ignore_patterns=["step_*", "epoch_*"],
-                    )
+            
+            if DEBUG:
+                exit()
 
     accelerator.end_training()
 

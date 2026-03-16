@@ -11,5 +11,3 @@ diffusers==0.27.2
 huggingface_hub==0.20.3
 pylidc
 tensorboard
-#wandb==0.16.6
-#xformers==0.0.28.post1

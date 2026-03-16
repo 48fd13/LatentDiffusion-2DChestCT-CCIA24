@@ -153,17 +153,6 @@ def parse_args():
     parser.add_argument("--ema_inv_gamma", type=float, default=1.0, help="The inverse gamma value for the EMA decay.")
     parser.add_argument("--ema_power", type=float, default=3 / 4, help="The power value for the EMA decay.")
     parser.add_argument("--ema_max_decay", type=float, default=0.9999, help="The maximum decay magnitude for EMA.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
-    parser.add_argument(
-        "--hub_model_id",
-        type=str,
-        default=None,
-        help="The name of the repository to keep in sync with the local `output_dir`.",
-    )
-    parser.add_argument(
-        "--hub_private_repo", action="store_true", help="Whether or not to create a private repository."
-    )
     parser.add_argument(
         "--logger",
         type=str,
@@ -250,10 +239,10 @@ def parse_args():
     )
     parser.add_argument("--emb_size", type=int, default=10, help="Dimensionality of nodule attributes embedding.")
     parser.add_argument("--vocab_len", type=int, default=6, help="Number of nodule attributes.")
+    parser.add_argument("--masks_dir", type=str, default=None, help="Directory where nodule masks are located.")
     parser.add_argument("--encode_mask", action="store_true", help="Whether or not to encode the localization mask.")
     parser.add_argument("--self_attention", action="store_true", help="Use self-attention.")
     parser.add_argument("--nodule_attributes", action="store_true", help="Use nodule attribute embeddings")
-    parser.add_argument("--nodule_attributes_v2", action="store_true", help="Use nodule attribute embeddings")
 
 
     args = parser.parse_args()
@@ -265,13 +254,8 @@ def parse_args():
     if args.dataset_name is None and args.train_data_files is None and args.train_data_dir is None:
         raise ValueError("You must specify either a dataset name from the hub or a train data directory.")
 
-    date_id = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    exp_id = f"{date_id}_" + args.output_dir.split("/")[-1]
-
+    exp_id = args.output_dir.split("/")[-1]
     print(f"\n\nRunning exp {exp_id}\n\n")
-
-    args.output_dir = args.output_dir.replace(args.output_dir.split("/")[-1], exp_id)
-    args.logging_dir = args.output_dir
 
     return args
 
@@ -292,7 +276,7 @@ class NoduleFeaturesEmbedding(ModelMixin, ConfigMixin):
 
         in_features = self.n_emb * self.emb_size
         out_features = self.emb_size
-        inner_features = 128 # out_features * 2
+        inner_features = out_features * 2 # 128 
 
         self.merging_block = torch.nn.Sequential(torch.nn.Linear(in_features, inner_features), nn.ReLU(),
                                                    torch.nn.Linear(inner_features, out_features), nn.ReLU())
@@ -405,12 +389,6 @@ def get_parameters(models):
         parameters += list(models.parameters())
     return parameters
 
-def merge_input_with_class_cond_embedding(input_vec, class_cond):
-    bs, ch, w, h = input_vec.shape
-    class_cond = class_cond.view(bs, class_cond.shape[1], 1, 1).expand(bs, class_cond.shape[1], w, h)
-    out = torch.cat((input_vec, class_cond), 1)
-    return out
-
 def generate_random_nodule_features(batch_size, labels, device):
     # valid values are 1, 2, 3, 4, 5
     d = {}
@@ -513,12 +491,6 @@ def load_nodule_masks(image_ids, metadata_path, masks_dir, resolution, device="g
         bbx = np.fromstring(metadata[idx]['bbx'], dtype=np.int16, sep=" ")
         first_row, last_row, first_col, last_col  = bbx[0], bbx[1], bbx[2], bbx[3]
         mask = np.array(Image.open(mask_path))
-        """
-        break_pls=False
-        if len(np.unique(mask) > 0):
-            break_pls=True
-            print(np.unique(mask))
-        """
         mask[mask<200] = 0
         if bbxmask:
             mask[first_row:last_row, first_col:last_col] = 255
@@ -544,6 +516,9 @@ class RandomMaskGenerator():
         for p in masks_paths:
             # nodule localization probabilities
             mask = np.array(Image.open(p)).astype(np.float32)
+            if len(mask.shape) > 2: # this should not happen, masks are supposed to be binary png format
+                print("warning: input masks are not grayscale, they have 3 channels (likely RGB)")
+                mask = mask[:, :, 0]
             prob_counter += mask/255
             
             # nodule size probabilities
@@ -655,8 +630,6 @@ class CondLatentDiffusionPipeline_LIDC(LatentDiffusionPipelineBase):
             output_type: Optional[str] = "pil",
             return_dict: bool = True,
             eta: Optional[float] = 0.0,
-            same_latent_everywhere: bool = False,
-            same_mask_everywhere: bool = False,
             **kwargs,
     ) -> Union[Tuple, ImagePipelineOutput]:
 
@@ -670,140 +643,101 @@ class CondLatentDiffusionPipeline_LIDC(LatentDiffusionPipelineBase):
             )
 
         device, dtype = self.vae.device, self.vae.dtype
-
+        
+        #parepare latents
         latents = self.prepare_latents(batch_size, 3, height, width,
                                        dtype, device, generator, latents)
+        # latents.shape = (batch_size, 3, latent_height, latent_width)
 
         self.scheduler.set_timesteps(num_inference_steps)
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-
-        #parepare latents
-        # nodule_features is expected to be a dict. E.g. {'sphericity': 4, 'margin': 1, 'lobulation': 2, 'texture': 5, 'spiculation': 1}
-        if nodule_features is None:
-            nodule_features = generate_random_nodule_features(batch_size, self.emb.feature_labels, self.emb.device)
-        if self.nodule_attributes:
-            emb_vec = self.emb(nodule_features)
-        masks = self.mask_generator.generate_n_masks_as_tensor(batch_size, resolution=height).to(device).type(self.vae.dtype)
-        #masks = masks/255.
         
-        # compress masks
-        if self.encode_mask:
-            mask_latents = self.vae.encode(masks).latents * 0.18215
-            # mask_latents.shape = (batch_size, 3, latent_height, latent_width)
-        else:
-            # simply downsample the masks
-            compressed_h, compressed_w = height // self.vae_scale_factor, width // self.vae_scale_factor
-            mask_t = transforms.Resize((compressed_h, compressed_w), interpolation=transforms.InterpolationMode.NEAREST)
-            mask_latents = torch.cat([mask_t(m).unsqueeze(0) for m in masks])
-            # use only one channel per binary mask instead of 3
-            mask_latents = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in mask_latents])
-            masks = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in masks])
-            # mask_latents.shape = (batch_size, 1, latent_height, latent_width)
-
         # init scheduler
         timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,), device=self.vae.device).long()
         noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device)
         _ = self.scheduler.add_noise(latents, noise, timesteps)
-        
-        # latents.shape = (batch_size, 3, latent_height, latent_width)
-        src_idx = 5
-        if same_latent_everywhere:
-            for i in np.arange(batch_size):
-                latents[i] = latents[src_idx].clone()
-        if same_mask_everywhere:
-            for i in np.arange(batch_size):
-                masks[i] = masks[src_idx].clone()
-                mask_latents[i] = mask_latents[src_idx].clone()
 
 
-        debug = False
+        unconditional = self.mask_generator is None
 
-        if debug:
-            print("before the loop", sum(latents[0].flatten() - latents[1].flatten()))
-            print("before the loop", sum(mask_latents[0].flatten() - mask_latents[1].flatten()))
+        # prepare conditional data
+        if not unconditional:
+            # (optional) load nodule attributes
+            # nodule_features is expected to be a dict. E.g. {'sphericity': 4, 'margin': 1, 'lobulation': 2, 'texture': 5, 'spiculation': 1}
+            if self.nodule_attributes:
+                assert self.emb is not None
+                if nodule_features is None:
+                    nodule_features = generate_random_nodule_features(batch_size, self.emb.feature_labels, self.emb.device)
+                emb_vec = self.emb(nodule_features)
+            else:
+                nodule_features = None
 
+            # load masks
+            masks = self.mask_generator.generate_n_masks_as_tensor(batch_size, resolution=height).to(device).type(self.vae.dtype)
+            #masks = masks/255.
+            # compress masks
+            if self.encode_mask:
+                mask_latents = self.vae.encode(masks).latents * 0.18215
+                # mask_latents.shape = (batch_size, 3, latent_height, latent_width)
+            else:
+                # simply downsample the masks
+                compressed_h, compressed_w = height // self.vae_scale_factor, width // self.vae_scale_factor
+                mask_t = transforms.Resize((compressed_h, compressed_w), interpolation=transforms.InterpolationMode.NEAREST)
+                mask_latents = torch.cat([mask_t(m).unsqueeze(0) for m in masks])
+                # use only one channel per binary mask instead of 3
+                mask_latents = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in mask_latents])
+                masks = torch.cat([m[0].unsqueeze(0).unsqueeze(0) for m in masks])
+                # mask_latents.shape = (batch_size, 1, latent_height, latent_width)
+
+        # run denoising iterative process
         for t in self.progress_bar(self.scheduler.timesteps):
 
             timesteps = t.repeat((batch_size,)).to(latents.device).long()
 
             latents = self.scheduler.scale_model_input(latents, t)
 
-            #noisy_latents = latents # this would be the unconditional scenario
-            noisy_latents = torch.cat((latents, mask_latents), 1)
-
-            
-
-            """
-            noise_pred = self.unet(
-                cond_latents,
-                t,
-            ).sample
-            """
-
-            cond_latents = mask_latents.view(batch_size, -1)
-            if self.nodule_attributes:
-                cond_latents = torch.cat([cond_latents, emb_vec], 1)
-                #noisy_latents = merge_input_with_class_cond_embedding(noisy_latents, emb_vec)
-
-            noise_pred = self.unet(x=noisy_latents, t=timesteps, context=cond_latents)
-
-            if debug:
-                print("after 1", sum(latents[0].flatten() - latents[1].flatten()))
-                print("after 1", sum(mask_latents[0].flatten() - mask_latents[1].flatten()))
-                print("noise_pred", sum(noise_pred[0].flatten() - noise_pred[1].flatten()))
+            if unconditional:
+                noisy_latents = latents
+                noise_pred = self.unet(noisy_latents, timesteps).sample
+            else:
+                noisy_latents = torch.cat((latents, mask_latents), 1)
+                cond_latents = mask_latents.view(batch_size, -1)
+                if self.nodule_attributes:
+                    cond_latents = torch.cat([cond_latents, emb_vec], 1)
+                noise_pred = self.unet(x=noisy_latents, t=timesteps, context=cond_latents)
 
             # compute the previous noisy sample x_t -> x_t-1
-            """
-            latents = self.scheduler.step(
+            latents = step(self.scheduler,
                 noise_pred, t, latents, **extra_step_kwargs
             ).prev_sample
-            """
-            if debug:
-                print("\n\n FIRST RUN \n\n")
-                latents_ = step(self.scheduler,
-                    noise_pred, t, latents, **extra_step_kwargs,
-                ).prev_sample
-            else:
-                latents = step(self.scheduler,
-                    noise_pred, t, latents, debug=False,
-                    same_variance_everywhere=same_latent_everywhere, src_idx=src_idx, **extra_step_kwargs
-                ).prev_sample
-
-            if debug:
-                print("latents one", latents_[0, 0, :3, :3])
-                print("latents one input", latents[0, 0, :3, :3])
-
-                print("\n\n SECOND RUN \n\n")
-                latents_ = step(self.scheduler,
-                    noise_pred, t, latents, **extra_step_kwargs
-                ).prev_sample
-                print("latents two", latents_[0, 0, :3, :3])
-                print("latents two input", latents[0, 0, :3, :3])
-
-                print("after 2", sum(latents[0].flatten() - latents[1].flatten()))
-                print("after 2", sum(mask_latents[0].flatten() - mask_latents[1].flatten()))
-                ue += 1
 
         # scale and decode the image latents with vae
-        images = self.decode_latents(latents)
-        input_masks = masks.permute(0, 2, 3, 1).detach().cpu().numpy()
-        if self.encode_mask:
-            output_masks = self.decode_latents(mask_latents)
-        else:
-            mask_t = transforms.Resize((height, width), interpolation=transforms.InterpolationMode.NEAREST)
-            output_masks = torch.cat([mask_t(m)[0].unsqueeze(0).unsqueeze(0) for m in mask_latents])
-            output_masks = output_masks.permute(0, 2, 3, 1).detach().cpu().numpy()
+        images = self.decode_latents(latents) # shape is (B, H, W, 3)
         
-        #input_masks *= 255
-        #output_masks *=255
+        # force grayscale intensities
+        images = np.mean(images, axis=-1, keepdims=True)
+        images = np.repeat(images, 3, axis=-1)
 
         if output_type == "pil":
             images = self.numpy_to_pil(images)
 
-        if not return_dict:
-            return (images, input_masks, output_masks, nodule_features)
+        if unconditional:
+            if not return_dict:
+                return (images,)
+        else:
+            input_masks = masks.permute(0, 2, 3, 1).detach().cpu().numpy()
+            if self.encode_mask:
+                output_masks = self.decode_latents(mask_latents)
+            else:
+                mask_t = transforms.Resize((height, width), interpolation=transforms.InterpolationMode.NEAREST)
+                output_masks = torch.cat([mask_t(m)[0].unsqueeze(0).unsqueeze(0) for m in mask_latents])
+                output_masks = output_masks.permute(0, 2, 3, 1).detach().cpu().numpy()
+            #input_masks *= 255
+            #output_masks *=255
+            if not return_dict:
+                return (images, input_masks, output_masks, nodule_features)
 
         return ImagePipelineOutput(images=images)
 
@@ -817,9 +751,6 @@ def step(
         sample: torch.Tensor,
         generator=None,
         return_dict: bool = True,
-        same_variance_everywhere: bool = False,
-        debug: bool = False,
-        src_idx: int = 0,
     ) -> Union[DDPMSchedulerOutput, Tuple]:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
@@ -891,11 +822,6 @@ def step(
         # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
         pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
 
-        if debug:
-            print("t", t)
-            print("pred_prev_sample", pred_prev_sample[0, 0, :3, :3])
-            print("predicted_variance", predicted_variance)
-
         # 6. Add noise
         variance = 0
         if t > 0:
@@ -903,9 +829,6 @@ def step(
             variance_noise = randn_tensor(
                 model_output.shape, generator=generator, device=device, dtype=model_output.dtype
             )
-            if same_variance_everywhere:
-                for sample_idx in torch.arange(variance_noise.shape[0]):
-                    variance_noise[sample_idx] = variance_noise[src_idx]
             if self.variance_type == "fixed_small_log":
                 variance = self._get_variance(t, predicted_variance=predicted_variance) * variance_noise
             elif self.variance_type == "learned_range":
@@ -913,50 +836,68 @@ def step(
                 variance = torch.exp(0.5 * variance) * variance_noise
             else:
                 variance = (self._get_variance(t, predicted_variance=predicted_variance) ** 0.5) * variance_noise
-
         pred_prev_sample = pred_prev_sample + variance
-
-
 
         if not return_dict:
             return (pred_prev_sample,)
 
         return DDPMSchedulerOutput(prev_sample=pred_prev_sample, pred_original_sample=pred_original_sample)
 
-def load_pipeline(model_path, dataset_name, verbose=True):
+def load_pipeline(ckpt_dir, masks_dir=None, verbose=True):
 
     if verbose:
         print("Loading Diffusion pipeline from:")
-        print(f"    - {model_path}\n")
+        print(f"    - {ckpt_dir}\n")
+
+    # load vae
     vae = VQModel.from_pretrained("CompVis/ldm-celebahq-256", subfolder="vqvae")
     vae.requires_grad_(False)
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
     vae.cuda()
     if verbose:
         print("VQ-VAE loaded")
-    emb = NoduleFeaturesEmbedding.from_pretrained(model_path, subfolder="emb")
-    emb.cuda()
-    if verbose:
-        print("Nodule Features Embedding loaded")
-    unet = UNetModel.from_pretrained(model_path, subfolder=f"unet")
+
+    # load u-net
+    unet_config_json_path = ckpt_dir + "/unet/config.json"
+    assert os.path.exists(unet_config_json_path)
+    with open(unet_config_json_path) as f:
+        unet_config_dict = json.load(f)
+        if unet_config_dict["_class_name"] == "UNetModel":
+            unet = UNetModel.from_pretrained(ckpt_dir, subfolder=f"unet")
+        else:
+            unet = UNet2DModel.from_pretrained(ckpt_dir, subfolder=f"unet")
     unet.cuda()
     if verbose:
         print("U-Net model loaded")
-    masks_dir = dataset_name.replace("nodules", "masks") + "_sq"
-    assert os.path.exists(masks_dir)
-    mask_generator = RandomMaskGenerator(masks_dir, verbose=False)
-    if verbose:
-        print("Synthetic mask generator loaded")
-
-    scheduler_config_path = model_path + "/scheduler/scheduler_config.json" 
-    noise_scheduler = DDPMScheduler.from_config(scheduler_config_path)
     
+    # (optional) load nodule features embedding module
+    emb = None
+    if os.path.exists(ckpt_dir + "/emb"):
+        emb = NoduleFeaturesEmbedding.from_pretrained(ckpt_dir, subfolder="emb")
+        emb.cuda()
+        if verbose:
+            print("Nodule Features Embedding loaded")
+
+    # (optional) load heuristic mask generator for conditional synthesis
+    # helps control the size and location of output pulmonary nodules
+    mask_generator = None
+    if masks_dir is not None:
+        assert os.path.exists(masks_dir)
+        print("Creating synthetic mask generator...")
+        mask_generator = RandomMaskGenerator(masks_dir, verbose=False)
+        if verbose:
+            print("...done!")
+
+    scheduler_config_path = ckpt_dir + "/scheduler/scheduler_config.json" 
+    noise_scheduler = DDPMScheduler.from_config(scheduler_config_path)
+
     pipeline = CondLatentDiffusionPipeline_LIDC(
         vae=vae,
         unet=unet,
         scheduler=noise_scheduler,
         emb=emb,
-        mask_generator=mask_generator)
+        mask_generator=mask_generator,
+        nodule_attributes=False if emb is None else True)
     print("Diffusion pipeline is ready\n")
     
     return pipeline

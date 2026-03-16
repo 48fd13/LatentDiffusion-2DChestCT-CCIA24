@@ -25,6 +25,7 @@ Bibtex citation:
   publisher={IOS Press}
 }
 ```
+DOI: https://doi.org/10.3233/FAIA240408
 
 #### Installation
 ```
@@ -71,13 +72,21 @@ The scripts in `dataset_preprocessing` were used to produce the training set of 
 ---
 #### Data
 
-Original data: [LIDC-IDRI](https://www.cancerimagingarchive.net/collection/lidc-idri/) dataset of chest CT scans (133.16GB).
+The training set of 2D images and nodule masks used in this work are available at Zenodo: https://doi.org/10.5281/zenodo.19053504
 
+All data and model checkpoints (6.4 GB) can be downloaded using `download_data.sh`
 
+```
+bash download_data.sh
+```
 
 ---
 
 #### Acknowledgements
+
+Training images and nodule masks were derived from the original [LIDC-IDRI](https://www.cancerimagingarchive.net/collection/lidc-idri/) dataset of chest CT scans (133.16GB).
+
+
 Training script based on:
 - Training an unconditional LDM: [https://github.com/zyinghua/uncond-image-generation-ldm](https://github.com/zyinghua/uncond-image-generation-ldm) - Original README [here](old_README.md).
 

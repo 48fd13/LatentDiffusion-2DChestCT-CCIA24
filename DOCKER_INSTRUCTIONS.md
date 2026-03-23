@@ -476,17 +476,20 @@ docker run --rm --gpus all \
 
 ---
 
-## 13. Suggested file to commit
-
-Save this document in the repository as:
+## 13. Export docker image
 
 ```text
-docker_instructions.md
+ docker save latentdiffusion-2dchestct-ccia24:latest | gzip > latentdiffusion-2dchestct-ccia24-1.0.tar.gz
 ```
+That output tar.gz will contain:
 
-or, if preferred for GitHub visibility:
+- the Docker image layers
+- metadata needed to load the image again
 
-```text
-DOCKER_INSTRUCTIONS.md
-```
+It will not contain:
+
+- your host `./data`
+- checkpoints stored in `./data/ckpts`
+- generated outputs stored in `./data/outputs`
+
 

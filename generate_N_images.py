@@ -18,13 +18,13 @@ from utils_lidc import *
 
 def save_pipeline_output_to_disk(output, batch_idx, batch_size, out_dir, save_masks):
     metadata_path = out_dir + "/ims/metadata.jsonl"
-    os.makedirs(out_dir + "/ims", exist_ok=True)
+    os.makedirs(out_dir + "/images", exist_ok=True)
     if save_masks:
         # conditional synthesis
         images, input_masks, output_masks, nodule_features = output
         super_images = merge_images_with_masks(images, input_masks)
         os.makedirs(out_dir + "/masks", exist_ok=True)
-        os.makedirs(out_dir + "/cool_ims", exist_ok=True)
+        os.makedirs(out_dir + "/overlay", exist_ok=True)
         if nodule_features is not None:
             for k in nodule_features.keys():
                 nodule_features[k] = nodule_features[k].detach().cpu().numpy()
@@ -40,7 +40,7 @@ def save_pipeline_output_to_disk(output, batch_idx, batch_size, out_dir, save_ma
         local_d["file_name"] = f"{global_img_idx:05d}.png"
 
         img = Image.fromarray((images[idx] * 255).astype(np.uint8))
-        img.save(out_dir + f"/ims/{global_img_idx:05d}.png")
+        img.save(out_dir + f"/images/{global_img_idx:05d}.png")
 
         if save_masks:
             mask = np.dstack([input_masks[idx], input_masks[idx], input_masks[idx]])
@@ -48,7 +48,7 @@ def save_pipeline_output_to_disk(output, batch_idx, batch_size, out_dir, save_ma
             img.save(out_dir + f"/masks/{global_img_idx:05d}.png")
 
             img = Image.fromarray((super_images[idx] * 255).astype(np.uint8))
-            img.save(out_dir + f"/cool_ims/{global_img_idx:05d}.png")
+            img.save(out_dir + f"/overlay/{global_img_idx:05d}.png")
 
             local_d["area"] = int(np.sum(input_masks[idx, :, :, 0].flatten() > 0))
             if nodule_features is not None:

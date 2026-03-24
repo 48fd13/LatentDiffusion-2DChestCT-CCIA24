@@ -40,8 +40,8 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
       pytorch_fid==0.3.0 \
       accelerate==0.26.1
 
-# Copy the full repository
-COPY . /opt/app
+# Copy the full repository excluding the data directory
+COPY --exclude=data . /opt/app
 
 # Helpful defaults
 ENV PYTHONUNBUFFERED=1

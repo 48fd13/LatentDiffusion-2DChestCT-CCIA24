@@ -17,7 +17,7 @@ from custom_unet_cond import *
 from utils_lidc import *
 
 def save_pipeline_output_to_disk(output, batch_idx, batch_size, out_dir, save_masks):
-    metadata_path = out_dir + "/ims/metadata.jsonl"
+    metadata_path = out_dir + "/images/metadata.jsonl"
     os.makedirs(out_dir + "/images", exist_ok=True)
     if save_masks:
         # conditional synthesis

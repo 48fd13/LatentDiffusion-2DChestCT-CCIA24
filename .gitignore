@@ -1,4 +1,7 @@
 data/
+web_outputs/
+latentdiffusion-2dchestct-ccia24-1.0.tar.gz
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

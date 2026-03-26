@@ -16,6 +16,8 @@ from pipeline import *
 import json
 import diffusers
 from custom_unet_cond import *
+from math import ceil
+
 
 # create a custom module that can be plugged into a diffusion pipeline from the diffusers library
 # this was helpful https://github.com/huggingface/diffusers/issues/3231
@@ -692,26 +694,38 @@ class CondLatentDiffusionPipeline_LIDC(LatentDiffusionPipelineBase):
                 # mask_latents.shape = (batch_size, 1, latent_height, latent_width)
 
         # run denoising iterative process
-        for t in self.progress_bar(self.scheduler.timesteps):
+        timesteps_ = list(self.scheduler.timesteps)
+        total_steps = len(timesteps_)
+        update_every = max(1, ceil(total_steps / 5))
+        with self.progress_bar(total=total_steps) as pbar:
+            done = 0
+            shown = 0
 
-            timesteps = t.repeat((batch_size,)).to(latents.device).long()
+            for t in timesteps_:
 
-            latents = self.scheduler.scale_model_input(latents, t)
+                timesteps = t.repeat((batch_size,)).to(latents.device).long()
 
-            if unconditional:
-                noisy_latents = latents
-                noise_pred = self.unet(noisy_latents, timesteps).sample
-            else:
-                noisy_latents = torch.cat((latents, mask_latents), 1)
-                cond_latents = mask_latents.view(batch_size, -1)
-                if self.nodule_attributes:
-                    cond_latents = torch.cat([cond_latents, emb_vec], 1)
-                noise_pred = self.unet(x=noisy_latents, t=timesteps, context=cond_latents)
+                latents = self.scheduler.scale_model_input(latents, t)
 
-            # compute the previous noisy sample x_t -> x_t-1
-            latents = step(self.scheduler,
-                noise_pred, t, latents, **extra_step_kwargs
-            ).prev_sample
+                if unconditional:
+                    noisy_latents = latents
+                    noise_pred = self.unet(noisy_latents, timesteps).sample
+                else:
+                    noisy_latents = torch.cat((latents, mask_latents), 1)
+                    cond_latents = mask_latents.view(batch_size, -1)
+                    if self.nodule_attributes:
+                        cond_latents = torch.cat([cond_latents, emb_vec], 1)
+                    noise_pred = self.unet(x=noisy_latents, t=timesteps, context=cond_latents)
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = step(self.scheduler,
+                    noise_pred, t, latents, **extra_step_kwargs
+                ).prev_sample
+
+                done += 1
+                if done % update_every == 0 or done == total_steps:
+                    pbar.update(done - shown)
+                    shown = done
 
         # scale and decode the image latents with vae
         images = self.decode_latents(latents) # shape is (B, H, W, 3)
@@ -843,7 +857,7 @@ def step(
 
         return DDPMSchedulerOutput(prev_sample=pred_prev_sample, pred_original_sample=pred_original_sample)
 
-def load_pipeline(ckpt_dir, masks_dir=None, verbose=True):
+def load_pipeline(ckpt_dir, masks_dir=None, verbose=True, device="cuda"):
 
     if verbose:
         print("Loading Diffusion pipeline from:")
@@ -853,7 +867,7 @@ def load_pipeline(ckpt_dir, masks_dir=None, verbose=True):
     vae = VQModel.from_pretrained("CompVis/ldm-celebahq-256", subfolder="vqvae")
     vae.requires_grad_(False)
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
-    vae.cuda()
+    vae.to(device)
     if verbose:
         print("VQ-VAE loaded")
 
@@ -866,7 +880,7 @@ def load_pipeline(ckpt_dir, masks_dir=None, verbose=True):
             unet = UNetModel.from_pretrained(ckpt_dir, subfolder=f"unet")
         else:
             unet = UNet2DModel.from_pretrained(ckpt_dir, subfolder=f"unet")
-    unet.cuda()
+    unet.to(device)
     if verbose:
         print("U-Net model loaded")
     
@@ -874,7 +888,7 @@ def load_pipeline(ckpt_dir, masks_dir=None, verbose=True):
     emb = None
     if os.path.exists(ckpt_dir + "/emb"):
         emb = NoduleFeaturesEmbedding.from_pretrained(ckpt_dir, subfolder="emb")
-        emb.cuda()
+        emb.to(device)
         if verbose:
             print("Nodule Features Embedding loaded")
 

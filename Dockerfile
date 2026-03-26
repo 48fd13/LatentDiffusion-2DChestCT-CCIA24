@@ -1,8 +1,15 @@
 # GPU-ready runtime aligned with the repo's CUDA 12.1 PyTorch install
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Etc/UTC
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/app:/opt/app/src \
+    HF_HOME=/opt/app/.cache/huggingface \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # System packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,34 +38,33 @@ WORKDIR /opt/app
 COPY requirements.txt /opt/app/requirements.txt
 
 # Upgrade pip and install Python dependencies
+# Flask is installed explicitly here so inference_app.py works even if
+# requirements.txt in the repo is not yet updated in the same commit.
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     python3 -m pip install --no-cache-dir -r requirements.txt && \
     python3 -m pip install --no-cache-dir \
-      torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-      --index-url https://download.pytorch.org/whl/cu121 && \
+        Flask==3.0.3 \
+        torch==2.5.1 \
+        torchvision==0.20.1 \
+        torchaudio==2.5.1 \
+        --index-url https://download.pytorch.org/whl/cu121 && \
     python3 -m pip install --no-cache-dir \
-      pytorch_fid==0.3.0 \
-      accelerate==0.26.1
+        pytorch_fid==0.3.0 \
+        accelerate==0.26.1
 
 # Copy the full repository
 COPY . /opt/app
 
-# Helpful defaults
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/opt/app:/opt/app/src
-ENV HF_HOME=/opt/app/.cache/huggingface
-ENV MPLCONFIGDIR=/tmp/matplotlib
-
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-
-# Optional OCI labels - adapt if PHASE IV AI requires specific metadata
+# Optional OCI labels
 LABEL org.opencontainers.image.title="LatentDiffusion-2DChestCT-CCIA24" \
       org.opencontainers.image.description="Docker image for Characterization of Synthetic Lung Nodules in Conditional Latent Diffusion of Chest CT Scans" \
       org.opencontainers.image.source="https://github.com/multimedia-eurecat/LatentDiffusion-2DChestCT-CCIA24"
 
-# Default entrypoint allows:
-# docker run IMAGE generate_N_images.py ...
+# Flask app serves on port 7860
+EXPOSE 7860
+
+# Default to the web inference app. Override at runtime if needed, e.g.:
 # docker run IMAGE train_lidc.py ...
+# docker run IMAGE generate_N_images.py ...
 ENTRYPOINT ["python3"]
-CMD ["--help"]
+CMD ["inference_app.py"]

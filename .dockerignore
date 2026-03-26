@@ -1,7 +1,9 @@
-data/
+latentdiffusion-2dchestct-ccia24-1.0.tar.gz
 __pycache__/
 *.pyc
 *.pyo
 .git
 .gitignore
 .vscode/
+web_outputs/
+data/outputs*

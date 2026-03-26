@@ -488,8 +488,6 @@ That output tar.gz will contain:
 
 It will not contain:
 
-- your host `./data`
-- checkpoints stored in `./data/ckpts`
 - generated outputs stored in `./data/outputs`
 
 

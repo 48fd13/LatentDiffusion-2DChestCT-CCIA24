@@ -1,0 +1,4 @@
+exec: /opt/app/scripts/nginx-run.sh
+after:
+  - app
+log: stdout

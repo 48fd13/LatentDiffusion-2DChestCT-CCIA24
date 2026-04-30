@@ -1,0 +1,2 @@
+exec: /opt/app/scripts/sshd-run.sh
+log: stdout
